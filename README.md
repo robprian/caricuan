@@ -20,7 +20,7 @@ atau double-click `index.html` (mode demo tetap jalan; live price butuh http aga
 
 - `index.html` — UI utama
 - `styles.css` — tema dark gold
-- `app.js` — engine sinyal lokal (EMA20/50/200, RSI14, MACD, Stochastic, ATR14, momentum) + live price + backtest 100 bar + kalkulator lot + riwayat localStorage
+- `app.js` — engine sinyal lokal (EMA20/50/200, RSI14, MACD pulih-2-bar, Stochastic cross, ATR14, momentum, ADX, Bollinger regime-aware, bias HTF, vote fundamental DXY/US10Y/regime-D1 + ambang asimetris, pullback guard anti-sell-di-dasar) + live price + backtest 100 bar + kalkulator lot + riwayat localStorage
 - `TradingViewWidget.jsx` — port 1:1 dari kode kamu, symbol diganti `OANDA:XAUUSD` (untuk proyek React)
 
 ## Sumber data
@@ -30,8 +30,9 @@ atau double-click `index.html` (mode demo tetap jalan; live price butuh http aga
 | Chart visual | TradingView embed `OANDA:XAUUSD` | butuh internet sekali load; tidak menyediakan API data |
 | OHLC histori | `stooq.com/q/d/l/?s=xauusd` | XAUUSD spot asli, gratis, tanpa key |
 | Fallback OHLC | Binance `PAXGUSDT` klines | proxy gold (±0.5%) |
-| Live price | Binance WebSocket `miniTicker` + `kline` (tick per detik, auto-fallback ke polling gold-api.com → goldprice.org → stooq → binance REST 8 detik) |
+| Live price | Binance WebSocket `miniTicker` + `kline` (tick per detik, auto-fallback ke polling gold-api.com → goldprice.org → binance REST 8 detik) |
 | Offline | Mode demo (centang di UI) | random-walk sintetik |
+| Fundamental | Stooq harian `dx.f` (DXY) + `10usy.b` (US10Y) dan klines harian Binance PAXG (regime D1 vs EMA50) | best-effort tanpa key; offline = engine murni teknikal |
 
 > Catatan jujur: widget `embed-widget-advanced-chart.js` TIDAK mengekspos data OHLC ke JS — ia hanya iframe visual. Jadi sinyal dihitung dari feed publik di atas, bukan "disedot" dari TradingView. Ini batasan resmi TradingView; alternatif resmi berbayar adalah Webhook/Strategy Alert.
 

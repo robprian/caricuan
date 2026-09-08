@@ -12,6 +12,60 @@ const state = {
   lastPaint: 0, lastRecomp: 0, _bt: null, lastTickT: 0,
 };
 
+/* ---------- fundamental + regime ---------- */
+/* Pelajaran backtrace 4401: teknikal M15 saja menjual dasar pullback di tengah
+   bull-market D1. Backdrop fundamental (DXY, US10Y, regime D1) kini ikut voting
+   dan membuat ambang melawan-angin lebih berat (asimetris). Best-effort: jika
+   feed gagal, engine jatuh kembali ke murni teknikal tanpa crash. */
+const fundState = { ok: false, score: 0, dxy: null, dxyChg: null, y10: null, y10Chg: null, d1: null, d1ema: null, note: "belum dimuat", src: "" };
+async function getStooqDaily(sym) {
+  const r = await fetchTO(`https://stooq.com/q/d/l/?s=${encodeURIComponent(sym)}&i=d`, 7000);
+  const lines = (await r.text()).trim().split("\n");
+  if (lines.length < 3) throw new Error("stooq " + sym + " kosong");
+  return lines.slice(1).map(l => { const p = l.split(","); return { t: p[0], c: +p[4] }; }).filter(x => isFinite(x.c));
+}
+async function refreshFundamentals() {
+  try {
+    const all = await Promise.allSettled([
+      fetchTO("https://api.binance.com/api/v3/klines?symbol=PAXGUSDT&interval=1d&limit=80", 9000).then(r => r.json()),
+      getStooqDaily("dx.f").catch(() => getStooqDaily("dxy")),
+      getStooqDaily("10usy.b"),
+    ]);
+    let score = 0; const parts = [];
+    if (all[0].status === "fulfilled") {
+      const cl = all[0].value.map(k => +k[4]).filter(isFinite);
+      if (cl.length > 55) {
+        const e = ema(cl, 50), d1 = cl[cl.length - 1], de = e[e.length - 1];
+        fundState.d1 = d1; fundState.d1ema = de;
+        if (d1 > de) { score++; parts.push(`D1 ${d1.toFixed(0)}>EMA50 ${de.toFixed(0)} (bull — pullback = peluang buy)`); }
+        else if (d1 < de) { score--; parts.push(`D1 ${d1.toFixed(0)}<EMA50 ${de.toFixed(0)} (bear — rally = peluang sell)`); }
+      }
+    }
+    if (all[1].status === "fulfilled") {
+      const q = all[1].value, n = q.length;
+      if (n >= 2) {
+        fundState.dxy = q[n - 1].c; fundState.dxyChg = 100 * (q[n - 1].c - q[n - 2].c) / (q[n - 2].c || 1);
+        if (fundState.dxyChg <= -0.2) { score++; parts.push(`DXY melemah ${fundState.dxyChg.toFixed(2)}% (bullish gold)`); }
+        else if (fundState.dxyChg >= 0.2) { score--; parts.push(`DXY menguat +${fundState.dxyChg.toFixed(2)}% (bearish gold)`); }
+        else parts.push(`DXY flat ${fundState.dxyChg >= 0 ? "+" : ""}${fundState.dxyChg.toFixed(2)}%`);
+      }
+    }
+    if (all[2].status === "fulfilled") {
+      const q = all[2].value, n = q.length;
+      if (n >= 2) {
+        fundState.y10 = q[n - 1].c; fundState.y10Chg = q[n - 1].c - q[n - 2].c;
+        if (fundState.y10Chg <= -0.03) { score++; parts.push(`US10Y turun ${fundState.y10Chg.toFixed(2)}pp (bullish gold)`); }
+        else if (fundState.y10Chg >= 0.03) { score--; parts.push(`US10Y naik +${fundState.y10Chg.toFixed(2)}pp (bearish gold)`); }
+        else parts.push(`US10Y flat ${fundState.y10Chg >= 0 ? "+" : ""}${fundState.y10Chg.toFixed(2)}pp`);
+      }
+    }
+    fundState.score = Math.max(-3, Math.min(3, score));
+    fundState.ok = parts.length > 0;
+    fundState.note = parts.join("; ") || "offline";
+    fundState.src = "binance D1 + stooq";
+  } catch (e) { fundState.ok = false; fundState.note = "fundamental offline (" + e.message + ")"; }
+}
+
 const TF_CONF = {
   M15: { stooq: "15", binance: "15m", tv: "15",  ws: "15m", name: "M15" },
   H1:  { stooq: "60", binance: "1h",  tv: "60",  ws: "1h",  name: "H1"  },
@@ -252,9 +306,12 @@ function buildSignal(cs) {
   const ax = adx(cs), bb = bollinger(cl), htf = htfBias(cs, state.tf);
   const div = divergence(cl, r);
   const win20 = cs.slice(Math.max(0, i - 19), i + 1);
+  const win50 = cs.slice(Math.max(0, i - 49), i + 1);
+  const majHi = Math.max(...win50.map(x => x.high)), majLo = Math.min(...win50.map(x => x.low));
   const last = {
-    e20: e20[i], e50: e50[i], e200: e200[i], rsi: r[i], rsiPrev: r[prev],
-    macdH: m.hist[i], macdHp: m.hist[prev], macdLine: m.line[i], macdSig: m.signal[i],
+    e20: e20[i], e50: e50[i], e200: e200[i], rsi: r[i], rsiPrev: r[prev], rsi2: r[cs.length - 3],
+    macdH: m.hist[i], macdHp: m.hist[prev], macdH2: m.hist[cs.length - 3], macdLine: m.line[i], macdSig: m.signal[i],
+    kPrev: st.k[prev], dPrev: st.d[prev], kPrev2: st.k[cs.length - 3],
     atr: a[i], k: st.k[i], d: st.d[i], close: cs[i].close,
     swingHi: Math.max(...win20.map(x => x.high)), swingLo: Math.min(...win20.map(x => x.low)),
     adx: ax.adx[i], plusDI: ax.plus[i], minusDI: ax.minus[i], bb: bb[i],
@@ -267,19 +324,43 @@ function buildSignal(cs) {
   votes.push({ n: `Harga vs EMA50 (${cs[i].close.toFixed(1)} vs ${last.e50.toFixed(1)})`, v: cs[i].close > last.e50 ? 1 : -1, w: 2 });
   votes.push({ n: `Harga vs EMA200`, v: cs[i].close > last.e200 ? 1 : -1, w: 1 });
   votes.push({ n: `RSI(14) ${last.rsi?.toFixed(1)}`, v: last.rsi > 55 ? 1 : last.rsi < 45 ? -1 : 0, w: 2 });
-  votes.push({ n: `MACD hist ${last.macdH?.toFixed(2)}`, v: last.macdH > 0 && last.macdH >= (last.macdHp ?? -1e9) ? 1 : last.macdH < 0 && last.macdH <= (last.macdHp ?? 1e9) ? -1 : 0, w: 2 });
-  votes.push({ n: `Stoch K/D ${last.k?.toFixed(0)}/${last.d?.toFixed(0)}`, v: last.k > last.d && last.k < 80 ? 1 : last.k < last.d && last.k > 20 ? -1 : 0, w: 1 });
+  // MACD: hargai PERUBAHAN momentum. Dulu hist negatif-yang-membaik dinilai 0 (netral)
+  // sehingga reversal awal seperti 4401 (hist -2.1→-1.3→-0.6) terkubur. Kini: pulih 2 bar = +1.
+  const macdUp = last.macdH != null && last.macdHp != null && last.macdH > last.macdHp;
+  const macdUp2 = macdUp && last.macdHp != null && last.macdH2 != null && last.macdHp > last.macdH2;
+  const macdDn2 = !macdUp && last.macdHp != null && last.macdH2 != null && last.macdHp < last.macdH2;
+  const macdV = last.macdH == null ? 0 : last.macdH > 0 ? (macdUp ? 1 : -1) : (macdUp2 ? 1 : (!macdUp ? -1 : 0));
+  votes.push({ n: `MACD hist ${last.macdH?.toFixed(2)}${last.macdH < 0 && macdUp2 ? " (pulih ↑)" : last.macdH > 0 && !macdUp ? " (melemah ↓)" : ""}`, v: macdV, w: 2 });
+  // Stochastic: yang dinilai CROSS-nya, bukan level jenuh. Di tren kuat K nempel >80
+  // adalah strength — dulu dinilai 0 sehingga vote bullish hilang tepat saat dibutuhkan.
+  const stochX = last.k != null && last.d != null && last.kPrev != null && last.dPrev != null &&
+    ((last.k > last.d && last.kPrev <= last.dPrev) || (last.k < last.d && last.kPrev >= last.dPrev));
+  const kRising2 = last.k != null && last.kPrev != null && last.kPrev2 != null && last.k > last.kPrev && last.kPrev > last.kPrev2;
+  const kFalling2 = last.k != null && last.kPrev != null && last.kPrev2 != null && last.k < last.kPrev && last.kPrev < last.kPrev2;
+  const stochV = last.k == null || last.d == null ? 0 : last.k > last.d ? 1 : last.k < last.d ? -1 : 0;
+  votes.push({ n: `Stoch K/D ${last.k?.toFixed(0)}/${last.d?.toFixed(0)}${stochX ? " (cross)" : ""}`, v: stochV, w: 1 });
   const mom = cl[i] - cl[Math.max(0, i - 5)];
   votes.push({ n: `Momentum 5 bar ${mom >= 0 ? "+" : ""}${mom.toFixed(1)}`, v: mom > 0 ? 1 : -1, w: 1 });
   const dSup = cs[i].close - last.swingLo, dRes = last.swingHi - cs[i].close;
   last.prox = dSup < 0.5 * last.atr ? 1 : dRes < 0.5 * last.atr ? -1 : 0;
+  // Jangan fade tren sehat: abaikan vote S/R 20-bar yang melawan DI dominan saat ADX kuat.
+  const diBull = last.plusDI != null && last.minusDI != null && last.plusDI > last.minusDI;
+  if (last.prox !== 0 && last.adx != null && last.adx >= 25 && ((last.prox < 0 && diBull) || (last.prox > 0 && !diBull))) last.prox = 0;
   if (last.div !== 0) votes.push({ n: `Divergensi RSI ${last.div > 0 ? "bullish" : "bearish"}`, v: last.div, w: 1 });
   if (last.prox !== 0) votes.push({ n: last.prox > 0 ? `Dekat support ${last.swingLo.toFixed(1)}` : `Dekat resistance ${last.swingHi.toFixed(1)}`, v: last.prox, w: 1 });
   if (htf.ok) votes.push({ n: `HTF ${htf.name} EMA20 ${htf.ema.toFixed(1)} RSI ${htf.rsi.toFixed(0)}`, v: cs[i].close > htf.ema && htf.rsi > 50 ? 1 : cs[i].close < htf.ema && htf.rsi < 50 ? -1 : 0, w: 2 });
-  if (last.bb != null) votes.push({ n: `Bollinger %B ${last.bb.toFixed(2)}`, v: last.bb < 0.15 ? 1 : last.bb > 0.85 ? -1 : 0, w: 1 });
+  // Bollinger: hanya di-fade saat market range (ADX<20). Saat tren kuat, %B ekstrem = strength.
+  const trendStrong = last.adx != null && last.adx >= 20;
+  if (last.bb != null) votes.push({ n: `Bollinger %B ${last.bb.toFixed(2)}${trendStrong ? " (tren: tak di-fade)" : ""}`, v: trendStrong ? 0 : last.bb < 0.15 ? 1 : last.bb > 0.85 ? -1 : 0, w: 1 });
   if (last.adx != null) votes.push({ n: `ADX ${last.adx.toFixed(1)} (DI+ ${last.plusDI.toFixed(0)}/DI- ${last.minusDI.toFixed(0)})`, v: last.plusDI > last.minusDI ? 1 : -1, w: 1 });
+  // Fundamental ikut voting (DXY • US10Y • regime D1). Best-effort: offline = tak ada vote.
+  const F = (typeof fundState !== "undefined" && fundState.ok) ? fundState.score : 0;
+  if (F !== 0) votes.push({ n: `Fundamental ${F > 0 ? "+" : ""}${F} (${fundState.note.split(";")[0].slice(0, 60)}${fundState.note.includes(";") ? "…" : ""})`, v: Math.sign(F), w: Math.abs(F) >= 2 ? 2 : 1 });
   const score = votes.reduce((s, x) => s + x.v * x.w, 0);
-  let dir = score >= 4 ? "BUY" : score <= -4 ? "SELL" : "NEUTRAL";
+  // Ambang asimetris: ikuti angin fundamental, persulit sinyal lawan arah.
+  let buyThr = 4, sellThr = -4;
+  if (F > 0) { buyThr = 3; sellThr = -6; } else if (F < 0) { buyThr = 6; sellThr = -3; }
+  let dir = score >= buyThr ? "BUY" : score <= sellThr ? "SELL" : "NEUTRAL";
   // confidence = porsi bobot kubu menang (kesepakatan), bukan skor/max
   const sgn = Math.sign(score);
   let winW = 0, loseW = 0, flatW = 0;
@@ -290,19 +371,57 @@ function buildSignal(cs) {
   if (last.adx >= 20 && htf.ok && ((dir === "BUY" && cs[i].close > htf.ema) || (dir === "SELL" && cs[i].close < htf.ema))) conf = Math.min(95, conf + 8);
   const price = state.live ?? cs[i].close;
   const slD = last.atr * 1.5, tp1D = last.atr * 1.5, tp2D = last.atr * 3;
+  // --- Bukti reversal + regime tren (pelajaran backtrace 4401) ---
+  // Kasus 4401: RSI 32.6→39.1→41.1 (menengadah) + MACD pulih 2 bar + Stoch bullish
+  // di atas support 50-bar, tapi engine lama tetap SELL karena vote EMA-stack/ADX
+  // yang lagging menenggelamkan semuanya.
+  const pat0 = candlePattern(cs);
+  const rsiTurnUp = last.rsi != null && last.rsiPrev != null && last.rsi < 48 && last.rsi > last.rsiPrev;
+  const rsiTurnDn = last.rsi != null && last.rsiPrev != null && last.rsi > 52 && last.rsi < last.rsiPrev;
+  const stochBullR = last.k != null && last.d != null && last.k > last.d && (last.k ?? 99) < 65 && (stochX || kRising2);
+  const stochBearR = last.k != null && last.d != null && last.k < last.d && (last.k ?? 0) > 35 && (stochX || kFalling2);
+  const nearSup50 = (cs[i].close - majLo) < 3 * last.atr;
+  const nearRes50 = (majHi - cs[i].close) < 3 * last.atr;
+  const revBull = [rsiTurnUp, stochBullR, macdUp2, pat0.dir > 0 || last.div > 0].filter(Boolean).length;
+  const revBear = [rsiTurnDn, stochBearR, macdDn2, pat0.dir < 0 || last.div < 0].filter(Boolean).length;
+  last.revBull = revBull; last.revBear = revBear; last.nearSup50 = nearSup50; last.nearRes50 = nearRes50;
+  last.majHi = majHi; last.majLo = majLo;
+  // Tren kuat = ADX>=25 + DI dominan + (jika ada) HTF searah. Fade/countertrend dilarang melawannya.
+  const strongUp = last.adx != null && last.adx >= 25 && diBull && (!htf.ok || (cs[i].close > htf.ema && htf.rsi > 50));
+  const strongDn = last.adx != null && last.adx >= 25 && !diBull && (!htf.ok || (cs[i].close < htf.ema && htf.rsi < 50));
   // --- Exhaustion: jangan kejar ujung (pelajaran backtrace 4401 & 4420) ---
+  // Diblokir KECUALI tren kuat tanpa bukti reversal (continuation diizinkan, bukan kejar ujung buta).
   let exNote = "", tag = "TREND", bounce = false;
   const overbought = last.rsi != null && last.rsi > 68 && last.bb != null && last.bb > 0.75;
   const oversold = last.rsi != null && last.rsi < 32 && last.bb != null && last.bb < 0.25;
-  if (dir === "BUY" && overbought) { dir = "NEUTRAL"; exNote = `BUY ditahan: overbought (RSI ${last.rsi.toFixed(0)}, %B ${last.bb.toFixed(2)}) — tunggu pullback`; }
-  if (dir === "SELL" && oversold) { dir = "NEUTRAL"; exNote = `SELL ditahan: oversold (RSI ${last.rsi.toFixed(0)}, %B ${last.bb.toFixed(2)}) — jangan sell di dasar`; }
+  if (dir === "BUY" && overbought && !(strongUp && revBear < 2)) { dir = "NEUTRAL"; exNote = `BUY ditahan: overbought (RSI ${last.rsi.toFixed(0)}, %B ${last.bb.toFixed(2)}) — tunggu pullback`; }
+  if (dir === "SELL" && oversold && !(strongDn && revBull < 2)) { dir = "NEUTRAL"; exNote = `SELL ditahan: oversold (RSI ${last.rsi.toFixed(0)}, %B ${last.bb.toFixed(2)}) — jangan sell di dasar`; }
+  // --- Pullback guard: sinyal tren yang melawan bukti reversal di dekat S/R mayor ---
+  // Guard ini membatalkan sinyal tren yang melawan bukti reversal (sesuai regime D1 & fundamental).
+  if (dir === "SELL" && nearSup50 && revBull >= 3) {
+    // Bounce BUY dibatalkan jika tren DAN fundamental kompak bearish (pisau jatuh) — cukup berdiri pinggir.
+    if ((revBull >= 4 || F > 0) && !(strongDn && F < 0)) { dir = "BUY"; bounce = true; exNote = `SELL dibatalkan → flip BUY: dasar pullback (${revBull}/4 bukti reversal: RSI menengadah, MACD pulih, Stoch bullish, candle/divergence) di dekat support ${majLo.toFixed(1)}`; }
+    else { dir = "NEUTRAL"; exNote = `SELL ditahan: ${revBull}/4 bukti reversal di dekat support ${majLo.toFixed(1)} — jangan sell di dasar, tunggu konfirmasi`; }
+  }
+  if (dir === "BUY" && nearRes50 && revBear >= 3) {
+    if ((revBear >= 4 || F < 0) && !(strongUp && F > 0)) { dir = "SELL"; bounce = true; exNote = `BUY dibatalkan → flip SELL: puncak pullback (${revBear}/4 bukti reversal bearish) di dekat resistance ${majHi.toFixed(1)}`; }
+    else { dir = "NEUTRAL"; exNote = `BUY ditahan: ${revBear}/4 bukti reversal di dekat resistance ${majHi.toFixed(1)} — jangan kejar puncak, tunggu konfirmasi`; }
+  }
+  // Bukti reversal bulat (4/4) di tengah range = berdiri di pinggir, jangan lawan tren yang kehabisan bahan bakar.
+  if (dir === "SELL" && !nearSup50 && revBull >= 4) { dir = "NEUTRAL"; exNote = `SELL ditahan: reversal bullish bulat 4/4 (RSI menengadah, MACD pulih, Stoch bullish, candle/divergence) — tren turun kehabisan bahan bakar`; }
+  if (dir === "BUY" && !nearRes50 && revBear >= 4) { dir = "NEUTRAL"; exNote = `BUY ditahan: reversal bearish bulat 4/4 — tren naik kehabisan bahan bakar`; }
   // --- Bounce countertrend: divergensi / extreme + support-resistance ---
+  // Fade ekstrem DILARANG melawan tren kuat (dulu SELL-buta di pucuk uptrend / BUY-buta di dasar downtrend).
   const nearSup = (cs[i].close - last.swingLo) < 0.5 * last.atr;
   const nearRes = (last.swingHi - cs[i].close) < 0.5 * last.atr;
   const rsiX = last.rsi ?? 50, bbX = last.bb ?? 0.5;
   if (dir === "NEUTRAL") {
-    if (rsiX < 40 && bbX < 0.1 && nearSup && (last.div > 0 || bbX < 0 || rsiX < 32)) { dir = "BUY"; bounce = true; }
-    else if (rsiX > 60 && bbX > 0.9 && nearRes && (last.div < 0 || bbX > 1 || rsiX > 68)) { dir = "SELL"; bounce = true; }
+    if (!strongDn && rsiX < 40 && bbX < 0.1 && nearSup && (last.div > 0 || bbX < 0 || rsiX < 32)) { dir = "BUY"; bounce = true; }
+    else if (!strongUp && rsiX > 60 && bbX > 0.9 && nearRes && (last.div < 0 || bbX > 1 || rsiX > 68)) { dir = "SELL"; bounce = true; }
+    // Bounce berbasis bukti (4/4) BOLEH melawan tren M15/H4 — itu inti pelajaran 4401.
+    // Yang dilarang hanya pisau jatuh total: tren kuat DAN fundamental kompak melawannya.
+    else if (nearSup50 && revBull >= 4 && !(strongDn && F < 0)) { dir = "BUY"; bounce = true; exNote = `BUY bounce: ${revBull}/4 bukti reversal di dekat support ${majLo.toFixed(1)} (target mean-reversion ke EMA, size setengah)`; }
+    else if (nearRes50 && revBear >= 4 && !(strongUp && F > 0)) { dir = "SELL"; bounce = true; exNote = `SELL bounce: ${revBear}/4 bukti reversal di dekat resistance ${majHi.toFixed(1)} (target mean-reversion ke EMA, size setengah)`; }
   }
   if (bounce) {
     // confidence countertrend dihitung dari bukti reversal, BUKAN skor trend
@@ -310,6 +429,10 @@ function buildSignal(cs) {
     if ((dir === "BUY" && last.div > 0) || (dir === "SELL" && last.div < 0)) bc += 10;
     if (rsiX < 30 || rsiX > 70) bc += 8;
     if ((dir === "BUY" && bbX < 0) || (dir === "SELL" && bbX > 1)) bc += 7;
+    if ((dir === "BUY" && revBull >= 4) || (dir === "SELL" && revBear >= 4)) bc += 5;
+    if ((dir === "BUY" && F > 0) || (dir === "SELL" && F < 0)) bc += 5; // didukung fundamental
+    if (typeof fundState !== "undefined" && fundState.d1 != null && fundState.d1ema != null &&
+      ((dir === "BUY") === (fundState.d1 > fundState.d1ema))) bc += 5; // searah regime D1
     conf = Math.min(80, bc);
   }
   const strength = conf >= 60 && dir !== "NEUTRAL" ? "STRONG " : "";
@@ -338,6 +461,7 @@ function buildSignal(cs) {
   if (dir !== "NEUTRAL" && !(last.volX <= 1.8)) whyNot.push(`volatilitas melonjak ${last.volX.toFixed(1)}×`);
   if (chop) whyNot.push("pasar CHOP (sideways)");
   if (bounce) whyNot.push("countertrend: TP di mean (EMA) + SL di luar extreme, size setengah");
+  if ((dir === "SELL" && F > 0) || (dir === "BUY" && F < 0)) whyNot.push(`melawan backdrop fundamental ${F > 0 ? "+" : ""}${F} — sinyal ini menentang angin DXY/US10Y/D1`);
   if (exNote) whyNot.push(exNote);
   let grade = "TUNGGU";
   if (dir !== "NEUTRAL") {
@@ -349,7 +473,7 @@ function buildSignal(cs) {
   const extATR = Math.abs(price - last.e20) / (last.atr || 1);
   const zone = dir === "BUY" ? (price > last.e20 ? last.e20 : last.e50)
     : dir === "SELL" ? (price < last.e20 ? last.e20 : last.e50) : null;
-  return { dir: strength + dir, raw: dir, conf, votes, last, lv, price, atr: last.atr, score, chop, grade, whyNot, htfAgree, extATR, zone, tag, exNote, pattern: candlePattern(cs) };
+  return { dir: strength + dir, raw: dir, conf, votes, last, lv, price, atr: last.atr, score, chop, grade, whyNot, htfAgree, extATR, zone, tag, exNote, pattern: pat0 };
 }
 function backtest(cs) {
   let t = 0, w1 = 0, w2 = 0;
@@ -435,8 +559,7 @@ function buildAnalysis(cs, sig) {
   const hNow = new Date().getUTCHours() + new Date().getUTCMinutes() / 60;
   const sessName = hNow >= 7 && hNow < 12 ? "London" : hNow >= 12 && hNow < 21 ? "New York" : hNow >= 0 && hNow < 7 ? "Asia" : "Off";
   const liq = hNow >= 12 && hNow < 16 ? "Overlap London–NY, likuiditas tertinggi" : hNow >= 7 && hNow < 12 ? "London aktif" : hNow >= 12 && hNow < 21 ? "New York aktif" : hNow >= 0 && hNow < 7 ? "Asia aktif" : "Jam sepi — spread lebar, hindari entry";
-  const mgmt = sig.raw === "BUY"
-    ? `TP1 (1R) → kunci 50% posisi, SL pindah ke breakeven. TP2 (2R) → runner, trailing 2×ATR. Batal jika close ${tf} < ${f1(L.swingLo)}.`
+  const mgmt = sig.raw === "BUY"    ? `TP1 (1R) → kunci 50% posisi, SL pindah ke breakeven. TP2 (2R) → runner, trailing 2×ATR. Batal jika close ${tf} < ${f1(L.swingLo)}.`
     : sig.raw === "SELL"
     ? `TP1 (1R) → kunci 50% posisi, SL pindah ke breakeven. TP2 (2R) → runner, trailing 2×ATR. Batal jika close ${tf} > ${f1(L.swingHi)}.`
     : "Belum ada posisi — disiplin menunggu setup A+ lebih baik daripada memaksa entry.";
@@ -456,7 +579,9 @@ function buildAnalysis(cs, sig) {
     <div class="kv"><span>Bias ${L.htfN} (HTF)</span><b>${L.htfOk ? "EMA " + f1(L.htfE) + " • RSI " + f1(L.htfR) + (px > L.htfE && L.htfR > 50 ? " — searah BUY" : px < L.htfE && L.htfR < 50 ? " — searah SELL" : " — mixed, hati-hati") : "data kurang"}</b></div>
     <div class="kv"><span>Bollinger %B</span><b>${L.bb != null ? L.bb.toFixed(2) + (L.bb < 0.15 ? " — oversold, rawan pantul" : L.bb > 0.85 ? " — overbought, rawan reject" : " — tengah band") : "—"}</b></div>
     <div class="kv"><span>Volatilitas</span><b>ATR ${f2(atr)} (${f1(L.volX)}× normal)${L.volX > 1.8 ? " — MELONJAK: setengah lot, jangan rapatkan SL" : ""}</b></div>
-    <div class="kv"><span>Divergensi RSI</span><b>${L.div > 0 ? "BULLISH — harga LL, RSI HL (waspada pantulan)" : L.div < 0 ? "BEARISH — harga HH, RSI LH (waspada reject)" : "tidak ada"}</b></div>${sig.exNote ? `<div class="kv"><span>Rem exhaustion</span><b>${sig.exNote}</b></div>` : ""}${sig.tag === "COUNTERTREND" ? `<div class="kv"><span>Mode</span><b>COUNTERTREND — size setengah, TP di mean (EMA), batal jika extreme jebol lagi</b></div>` : ""}
+    <div class="kv"><span>Divergensi RSI</span><b>${L.div > 0 ? "BULLISH — harga LL, RSI HL (waspada pantulan)" : L.div < 0 ? "BEARISH — harga HH, RSI LH (waspada reject)" : "tidak ada"}</b></div>
+    <div class="kv"><span>Fundamental (DXY•US10Y•D1)</span><b>${(typeof fundState !== "undefined" && fundState.ok) ? `skor ${fundState.score > 0 ? "+" : ""}${fundState.score} (${fundState.score > 0 ? "backdrop BULLISH — SELL dipersulit" : fundState.score < 0 ? "backdrop BEARISH — BUY dipersulit" : "netral"}) — ${fundState.note}` : "offline — keputusan murni teknikal, waspada"}</b></div>
+    <div class="kv"><span>Bukti reversal (pelajaran 4401)</span><b>bull ${L.revBull ?? 0}/4 • bear ${L.revBear ?? 0}/4${L.nearSup50 ? ` • dekat support 50-bar ${f1(L.majLo)}` : ""}${L.nearRes50 ? ` • dekat resistance 50-bar ${f1(L.majHi)}` : ""}${(L.revBull >= 3 || L.revBear >= 3) ? " — sinyal tren yang melawan bukti ini DITAHAN/dibalik" : ""}</b></div>${sig.exNote ? `<div class="kv"><span>Rem exhaustion</span><b>${sig.exNote}</b></div>` : ""}${sig.tag === "COUNTERTREND" ? `<div class="kv"><span>Mode</span><b>COUNTERTREND — size setengah, TP di mean (EMA), batal jika extreme jebol lagi</b></div>` : ""}
     <div class="kv"><span>Sesi & likuiditas</span><b>${sessName} (${new Date().toISOString().slice(11, 16)} UTC) — ${liq}</b></div>
     <div class="kv"><span>Manajemen trade</span><b>${mgmt}</b></div>
     ${flat.length ? `<div class="kv"><span>Netral (tunggu)</span><b>${flat.join("; ")}</b></div>` : ""}
@@ -468,7 +593,7 @@ async function pollLive() {
   const tries = [
     async () => { const r = await fetchTO("https://api.gold-api.com/price/XAU"); const j = await r.json(); return { p: +j.price, s: "gold-api.com" }; },
     async () => { const r = await fetchTO("https://data-asg.goldprice.org/dbXRates/USD"); const j = await r.json(); return { p: +j.items[0].xauPrice, s: "goldprice.org" }; },
-    async () => { const r = await fetchTO("https://stooq.com/q/l/?s=xauusd&f=sd2t2ohlcv&h&e=csv"); const l = (await r.text()).trim().split("\n").pop().split(","); return { p: +l[6], s: "stooq quote" }; },
+    async () => { const r = await fetchTO("https://api.binance.com/api/v3/klines?symbol=PAXGUSDT&interval=1m&limit=1"); const j = await r.json(); return { p: +j[0][4], s: "binance PAXG 1m*" }; },
     async () => { const r = await fetchTO("https://api.binance.com/api/v3/ticker/price?symbol=PAXGUSDT"); const j = await r.json(); return { p: +j.price, s: "binance PAXG*" }; },
   ];
   for (const fn of tries) { try { const { p, s } = await fn(); if (isFinite(p) && p > 0) { state.prevLive = state.live; state.live = p; renderLive(s); return; } } catch { } }
@@ -885,7 +1010,9 @@ async function refresh() {
     try { cs = await getStooq(state.tf); fromStooq = true; $("dataStatus").textContent = "data: Stooq XAUUSD ✔"; }
     catch { cs = await getBinance(state.tf); $("dataStatus").textContent = "data: Binance PAXG (proxy) ✔"; }
     if (fromStooq && TF_CONF[state.tf].resample) cs = resample(cs, TF_CONF[state.tf].resample);
-    state.candles = cs.slice(-300);
+    // M15 butuh 480 bar agar bias HTF H4 (resample ×16 → 30 bar) valid; dulu slice(-300)
+    // membuat htf.ok selalu false di M15 sehingga filter HTF mati diam-diam.
+    state.candles = cs.slice(-(state.tf === "M15" ? 480 : 300));
   } catch {
     state.candles = genDemo(state.live || 2650);
     $("dataStatus").textContent = "data: DEMO offline (simulasi)";
@@ -893,6 +1020,8 @@ async function refresh() {
   if (!state.wsOk) await pollLive();
   state._bt = state.candles.length > 60 ? backtest(state.candles) : "—";
   render(buildSignal(state.candles), state._bt);
+  // Fundamental non-blocking (jangan perlambat render): setelah tiba, hitung ulang sekali.
+  refreshFundamentals().then(() => { if (state.candles.length) render(buildSignal(state.candles), state._bt); }).catch(() => {});
   if (!state.wsOk && !demo) connectWS();
   state.countdown = 60;
 }
