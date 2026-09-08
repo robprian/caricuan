@@ -1,11 +1,13 @@
 /* XAUUSD Signal Lokal — engine murni frontend, tanpa API key.
-   Urutan data: 1) Stooq XAUUSD asli  2) Binance PAXGUSDT (proxy gold)  3) Demo sintetik.
-   Live price: Gold-API -> goldprice.org -> Stooq quote -> Binance.
+   Data: Binance PAXGUSDT (proxy gold ±0.5%) untuk M15/H1/H4/D1 sekaligus (MTF).
+   Live price: Gold-API -> goldprice.org -> Binance (REST/WS tick per detik).
+   1 chart (Lightweight Charts, lokal) + sinyal + garis Entry/SL/TP.
 */
 const $ = (id) => document.getElementById(id);
 const state = {
   tf: "M15",
   candles: [],
+  mtf: {}, _mtf: null, _mtfTime: "",
   live: null, prevLive: null,
   lastSignal: null, countdown: 60, timer: null,
   ws: null, wsOk: false, wsRetry: 0, ticks: [],
@@ -67,33 +69,14 @@ async function refreshFundamentals() {
 }
 
 const TF_CONF = {
-  M15: { stooq: "15", binance: "15m", tv: "15",  ws: "15m", name: "M15" },
-  H1:  { stooq: "60", binance: "1h",  tv: "60",  ws: "1h",  name: "H1"  },
-  H4:  { stooq: "60", binance: "4h",  tv: "240", ws: "4h",  name: "H4", resample: 4 },
-  D1:  { stooq: "d",  binance: "1d",  tv: "D",   ws: "1d",  name: "D1"  },
+  M15: { binance: "15m", ws: "15m", name: "M15" },
+  H1:  { binance: "1h",  ws: "1h",  name: "H1"  },
+  H4:  { binance: "4h",  ws: "4h",  name: "H4"  },
+  D1:  { binance: "1d",  ws: "1d",  name: "D1"  },
 };
-
-/* ---------- TradingView widget (port dari React kamu, symbol -> OANDA:XAUUSD) ---------- */
-function loadTV(tf) {
-  const c = TF_CONF[tf];
-  const holder = $("tv-container");
-  holder.innerHTML = '<div id="tv-widget" class="tradingview-widget-container__widget"></div>';
-  const script = document.createElement("script");
-  script.src = "https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js";
-  script.type = "text/javascript";
-  script.async = true;
-  script.innerHTML = JSON.stringify({
-    allow_symbol_change: true, calendar: false, details: false,
-    hide_side_toolbar: true, hide_top_toolbar: false, hide_legend: false,
-    hide_volume: false, hotlist: false, interval: String(c.tv), locale: "en",
-    save_image: true, style: "1", symbol: "OANDA:XAUUSD", theme: "dark",
-    timezone: "Etc/UTC", backgroundColor: "#0F0F0F",
-    gridColor: "rgba(242, 242, 242, 0.2)",
-    watchlist: [], withdateranges: false, compareSymbols: [],
-    support_host: "https://www.tradingview.com", studies: [], autosize: true,
-  });
-  holder.appendChild(script);
-}
+/* Timeframe untuk analisa multi-timeframe + jumlah bar yang disimpan. */
+const MTF_LIST = ["M15", "H1", "H4", "D1"];
+const MTF_KEEP = { M15: 480, H1: 240, H4: 240, D1: 120 };
 
 /* ---------- fetch helpers ---------- */
 async function fetchTO(url, ms = 9000) {
@@ -102,29 +85,27 @@ async function fetchTO(url, ms = 9000) {
   try { const r = await fetch(url, { signal: ctl.signal }); if (!r.ok) throw new Error(r.status); return r; }
   finally { clearTimeout(t); }
 }
-function parseStooqCSV(txt) {
-  const lines = txt.trim().split("\n");
-  if (lines.length < 3) throw new Error("stooq kosong");
-  const out = [];
-  for (let i = 1; i < lines.length; i++) {
-    const p = lines[i].split(",");
-    if (p.length < 6) continue;
-    const close = parseFloat(p[4]); if (!isFinite(close)) continue;
-    out.push({ time: p[0], open: +p[1], high: +p[2], low: +p[3], close, volume: +(p[5] || 0) });
-  }
-  return out;
-}
-async function getStooq(tf) {
-  const i = TF_CONF[tf].stooq;
-  const r = await fetchTO(`https://stooq.com/q/d/l/?s=xauusd&i=${i}`);
-  return parseStooqCSV(await r.text());
-}
-async function getBinance(tf) {
+async function getKlines(tf) {
   const iv = TF_CONF[tf].binance;
-  const lim = tf === "M15" ? 480 : 300; // M15 butuh bar lebih agar bias HTF (resample ×16) valid
-  const r = await fetchTO(`https://api.binance.com/api/v3/klines?symbol=PAXGUSDT&interval=${iv}&limit=${lim}`);
+  const r = await fetchTO(`https://api.binance.com/api/v3/klines?symbol=PAXGUSDT&interval=${iv}&limit=${MTF_KEEP[tf]}`);
   const j = await r.json();
   return j.map(k => ({ time: k[0], open: +k[1], high: +k[2], low: +k[3], close: +k[4], volume: +k[5] }));
+}
+/* Sinyal per-TF untuk MTF: pakai close candle (tanpa live tick) agar level tiap TF akurat. */
+function signalFor(tf, candles) {
+  const kt = state.tf, kl = state.live;
+  state.tf = tf; state.live = null;
+  const s = buildSignal(candles);
+  state.tf = kt; state.live = kl;
+  return s;
+}
+function computeMTF() {
+  const out = {};
+  for (const tf of MTF_LIST) {
+    const cs = (state.mtf[tf] && state.mtf[tf].candles) || [];
+    out[tf] = cs.length >= 40 ? signalFor(tf, cs) : null;
+  }
+  return out;
 }
 function genDemo(seedPrice = 2650, n = 300) {
   let p = seedPrice, out = [], t = Date.now() - n * 360e4;
@@ -501,91 +482,46 @@ function backtest(cs) {
   return t ? `TP1 ${Math.round(w1 / t * 100)}% • TP2 ${Math.round(w2 / t * 100)}% (${t})` : "—";
 }
 
-/* ---------- analisa naratif realtime: kapan buy/sell, SL/TP + alasan ---------- */
-function buildAnalysis(cs, sig) {
+/* ---------- analisa ringkas: vonis + tabel MTF + 3 alasan + 1 waspada ---------- */
+function buildAnalysis(cs, sig, mtf) {
   const L = sig.last, tf = state.tf;
-  const f1 = (n) => (+n).toFixed(1), f2 = (n) => (+n).toFixed(2);
-  const px = sig.price, atr = L.atr, buf = atr * 0.3;
-  const bull = sig.votes.filter(v => v.v > 0).map(v => v.n);
-  const bear = sig.votes.filter(v => v.v < 0).map(v => v.n);
-  const flat = sig.votes.filter(v => v.v === 0).map(v => v.n);
-  const pos = px > L.swingHi ? "di ATAS resistance 20-bar (breakout)" : px < L.swingLo ? "di BAWAH support 20-bar (breakdown)" : "di DALAM range 20-bar";
-
-  function plan(side) {
-    const isBuy = side === "BUY";
-    const openDet = (typeof window === "undefined" || window.innerWidth >= 700) ? "open" : "";
-    const entry = sig.raw === side ? px : L.e50;
-    const sl = isBuy ? entry - atr * 1.5 : entry + atr * 1.5;
-    const risk = Math.abs(entry - sl);
-    const tp1 = isBuy ? entry + risk : entry - risk;
-    const tp2 = isBuy ? entry + risk * 2 : entry - risk * 2;
-    const structSL = isBuy ? L.swingLo - buf : L.swingHi + buf;
-    const structTgt = isBuy ? L.swingHi : L.swingLo;
-    const now = sig.raw === side;
-    const why = (isBuy ? bull : bear).slice(0, 3).join("; ") || "—";
-    const lawan = (isBuy ? bear : bull).slice(0, 2).join("; ") || "—";
-    const kapan = now
-      ? `Momentum SEARAH ${side} di ${tf} (confidence ${sig.conf}%). Opsi: market dengan size kecil, atau buy-limit/sell-limit di pullback EMA50 ${f1(L.e50)}.`
-      : `JANGAN market-${isBuy ? "buy" : "sell"} sekarang. TUNGGU ${isBuy ? "pullback ke EMA50 " + f1(L.e50) + " + konfirmasi: candle " + tf + " tutup searah & RSI menembus 50" : "rally ke EMA50 " + f1(L.e50) + " + konfirmasi: candle " + tf + " tutup searah & RSI menembus 50"}. Alternatif agresif: ${isBuy ? "buy-stop di atas " + f1(L.swingHi) : "sell-stop di bawah " + f1(L.swingLo)} jika breakout dengan body penuh.`;
-    const batal = isBuy ? `Close ${tf} di bawah ${f1(L.swingLo)} → ide buy BATAL (flip ke bias sell).` : `Close ${tf} di atas ${f1(L.swingHi)} → ide sell BATAL (flip ke bias buy).`;
-    return `<details class="plan ${isBuy ? "buy" : "sell"}" ${openDet}><summary><b>Rencana ${side}</b> — Entry ${f2(entry)} | SL ${f2(sl)} | TP1 ${f2(tp1)} | TP2 ${f2(tp2)}</summary>
-      <ul><li><b>Kapan:</b> ${kapan}</li>
-      <li><b>Kenapa entry di situ:</b> ${now ? "harga sudah di sisi benar EMA50 + voting indikator menang." : "EMA50 = value-area dinamis " + tf + "; entry di sana memberi risk/reward terbaik, bukan kejar harga."} ${why}.</li>
-      <li><b>Kenapa SL di situ:</b> 1.5× ATR(${f2(atr)}) = risiko $${f1(risk)}. Alternatif SL struktur: ${f2(structSL)} (di luar ${isBuy ? "support" : "resistance"} ${f1(isBuy ? L.swingLo : L.swingHi)} + buffer $${f1(buf)} anti-noise).</li>
-      <li><b>Kenapa TP di situ:</b> TP1 = 1R (${f2(tp1)}, dekat target struktur ${f1(structTgt)} → kunci partial), TP2 = 2R (${f2(tp2)} → runner).</li>
-      <li><b>Waspada (kubu lawan):</b> ${lawan}.</li>
-      <li><b>Batal jika:</b> ${batal}</li></ul></details>`;
-  }
-  const gBanner = sig.grade === "A+" ? "PROBABILITAS TERTINGGI — semua filter lolos, ikuti trigger di bawah"
-    : sig.grade === "A" ? "Bagus tapi belum elite — size kecil, atau tunggu konfirmasi candle berikutnya"
-    : sig.grade === "B" ? "Campuran — JANGAN entry dulu, tunggu setup A+"
-    : "Tidak ada edge — tutup chart, jangan paksa entry. Disiplin menunggu = profit.";
-  // --- analisa lanjutan: skor voting, level kunci, pivot, fibonacci, sesi, manajemen trade ---
-  let wBull = 0, wBear = 0;
-  sig.votes.forEach(v => { if (v.v > 0) wBull += v.w; else if (v.v < 0) wBear += v.w; });
-  const totW = wBull + wBear;
-  const scoreTxt = totW ? `${Math.round(100 * wBull / totW)}% BULL vs ${Math.round(100 * wBear / totW)}% BEAR (net ${sig.score >= 0 ? "+" : ""}${sig.score})` : "imbang";
-  const win50 = cs.slice(Math.max(0, cs.length - 50));
-  const majHi = Math.max(...win50.map(x => x.high)), majLo = Math.min(...win50.map(x => x.low));
-  const majTxt = `${f1(majLo)} / ${f1(majHi)}` + (px < majLo ? " — di BAWAH support utama (breakdown)" : px > majHi ? " — di ATAS resistance utama (breakout)" : " — harga di dalam area ini");
-  const pv = pivotLevels(cs);
-  const pvTxt = pv ? `P ${f1(pv.P)} • R1 ${f1(pv.R1)} • R2 ${f1(pv.R2)} • S1 ${f1(pv.S1)} • S2 ${f1(pv.S2)}${px > pv.R1 ? " — di atas R1" : px < pv.S1 ? " — di bawah S1" : ""}` : "data harian belum cukup";
-  const fibs = fibLevels(cs);
-  let fibTxt = "—";
-  if (fibs) {
-    const near = fibs.levels.filter(l => Math.abs(l.p - px) <= 2 * atr);
-    fibTxt = fibs.levels.map(l => l.p.toFixed(1)).join(" / ") + (near.length ? ` — dekat harga: ${near.map(l => l.p.toFixed(1)).join(", ")}` : "");
-  }
-  const hNow = new Date().getUTCHours() + new Date().getUTCMinutes() / 60;
-  const sessName = hNow >= 7 && hNow < 12 ? "London" : hNow >= 12 && hNow < 21 ? "New York" : hNow >= 0 && hNow < 7 ? "Asia" : "Off";
-  const liq = hNow >= 12 && hNow < 16 ? "Overlap London–NY, likuiditas tertinggi" : hNow >= 7 && hNow < 12 ? "London aktif" : hNow >= 12 && hNow < 21 ? "New York aktif" : hNow >= 0 && hNow < 7 ? "Asia aktif" : "Jam sepi — spread lebar, hindari entry";
-  const mgmt = sig.raw === "BUY"    ? `TP1 (1R) → kunci 50% posisi, SL pindah ke breakeven. TP2 (2R) → runner, trailing 2×ATR. Batal jika close ${tf} < ${f1(L.swingLo)}.`
-    : sig.raw === "SELL"
-    ? `TP1 (1R) → kunci 50% posisi, SL pindah ke breakeven. TP2 (2R) → runner, trailing 2×ATR. Batal jika close ${tf} > ${f1(L.swingHi)}.`
-    : "Belum ada posisi — disiplin menunggu setup A+ lebih baik daripada memaksa entry.";
-  const gWhy = sig.whyNot && sig.whyNot.length ? `<div class="kv"><span>Syarat A+ yg belum lolos</span><b>${sig.whyNot.join("; ")}</b></div>` : "";
-  const gZone = sig.zone != null ? `<div class="kv"><span>Zona limit ideal</span><b>${sig.zone.toFixed(1)} (tunggu pullback ke EMA, entry lebih murah; ekstensi harga ${sig.extATR.toFixed(1)}× ATR${sig.extATR > 1 ? " — KEJAR HARGA = dilarang" : ""})</b></div>` : "";
-  return `<div class="gradebanner g${sig.grade.replace("+", "p")}">SETUP ${sig.grade} — ${gBanner}</div>${gWhy}${gZone}
-  <div class="kv"><span>Posisi harga</span><b>${f2(px)} — ${pos}</b></div>
-    <div class="kv"><span>Skor voting</span><b>${scoreTxt}</b></div>
-    <div class="kv"><span>Support/Resistance utama (50 bar)</span><b>${majTxt}</b></div>
-    <div class="kv"><span>Pivot harian (klasik)</span><b>${pvTxt}</b></div>
-    <div class="kv"><span>Fibonacci (swing 60 bar)</span><b>${fibTxt}</b></div>
-    <div class="kv"><span>Range 20 bar</span><b>${f1(L.swingLo)} – ${f1(L.swingHi)}</b></div>
-    <div class="kv"><span>EMA20 / 50 / 200</span><b>${f1(L.e20)} / ${f1(L.e50)} / ${f1(L.e200)}</b></div>
-    <div class="kv"><span>RSI14</span><b>${f1(L.rsi)} (bar lalu ${f1(L.rsiPrev)}) ${L.rsi > 55 ? "— bullish" : L.rsi < 45 ? "— bearish" : "— netral"}</b></div>
-    <div class="kv"><span>MACD line/signal/hist</span><b>${f2(L.macdLine)} / ${f2(L.macdSig)} / ${f2(L.macdH)} ${L.macdH > 0 ? "— momentum beli" : "— momentum jual"}</b></div>
-    <div class="kv"><span>ADX / DI+ / DI-</span><b>${L.adx != null ? f1(L.adx) + " / " + f1(L.plusDI) + " / " + f1(L.minusDI) + (L.adx < 15 ? " — CHOP, jangan kejar trend" : L.adx >= 20 ? " — TREND sehat" : " — transisi") : "data kurang"}</b></div>
-    <div class="kv"><span>Bias ${L.htfN} (HTF)</span><b>${L.htfOk ? "EMA " + f1(L.htfE) + " • RSI " + f1(L.htfR) + (px > L.htfE && L.htfR > 50 ? " — searah BUY" : px < L.htfE && L.htfR < 50 ? " — searah SELL" : " — mixed, hati-hati") : "data kurang"}</b></div>
-    <div class="kv"><span>Bollinger %B</span><b>${L.bb != null ? L.bb.toFixed(2) + (L.bb < 0.15 ? " — oversold, rawan pantul" : L.bb > 0.85 ? " — overbought, rawan reject" : " — tengah band") : "—"}</b></div>
-    <div class="kv"><span>Volatilitas</span><b>ATR ${f2(atr)} (${f1(L.volX)}× normal)${L.volX > 1.8 ? " — MELONJAK: setengah lot, jangan rapatkan SL" : ""}</b></div>
-    <div class="kv"><span>Divergensi RSI</span><b>${L.div > 0 ? "BULLISH — harga LL, RSI HL (waspada pantulan)" : L.div < 0 ? "BEARISH — harga HH, RSI LH (waspada reject)" : "tidak ada"}</b></div>
-    <div class="kv"><span>Fundamental (DXY•US10Y•D1)</span><b>${(typeof fundState !== "undefined" && fundState.ok) ? `skor ${fundState.score > 0 ? "+" : ""}${fundState.score} (${fundState.score > 0 ? "backdrop BULLISH — SELL dipersulit" : fundState.score < 0 ? "backdrop BEARISH — BUY dipersulit" : "netral"}) — ${fundState.note}` : "offline — keputusan murni teknikal, waspada"}</b></div>
-    <div class="kv"><span>Bukti reversal (pelajaran 4401)</span><b>bull ${L.revBull ?? 0}/4 • bear ${L.revBear ?? 0}/4${L.nearSup50 ? ` • dekat support 50-bar ${f1(L.majLo)}` : ""}${L.nearRes50 ? ` • dekat resistance 50-bar ${f1(L.majHi)}` : ""}${(L.revBull >= 3 || L.revBear >= 3) ? " — sinyal tren yang melawan bukti ini DITAHAN/dibalik" : ""}</b></div>${sig.exNote ? `<div class="kv"><span>Rem exhaustion</span><b>${sig.exNote}</b></div>` : ""}${sig.tag === "COUNTERTREND" ? `<div class="kv"><span>Mode</span><b>COUNTERTREND — size setengah, TP di mean (EMA), batal jika extreme jebol lagi</b></div>` : ""}
-    <div class="kv"><span>Sesi & likuiditas</span><b>${sessName} (${new Date().toISOString().slice(11, 16)} UTC) — ${liq}</b></div>
-    <div class="kv"><span>Manajemen trade</span><b>${mgmt}</b></div>
-    ${flat.length ? `<div class="kv"><span>Netral (tunggu)</span><b>${flat.join("; ")}</b></div>` : ""}
-    ${plan("BUY")}${plan("SELL")}`;
+  const f1 = (n) => (+n).toFixed(1);
+  mtf = mtf || {};
+  const rows = MTF_LIST.map(t => {
+    const s = mtf[t];
+    if (!s) return `<tr><td><b>${t}</b></td><td colspan="3" class="flat">—</td></tr>`;
+    const cls = s.raw === "BUY" ? "bull" : s.raw === "SELL" ? "bear" : "flat";
+    const vsEma = s.price > s.last.e50 ? "> EMA50" : "< EMA50";
+    return `<tr><td><b>${t}</b>${t === tf ? " ◀" : ""}</td><td class="${cls}">${s.raw} ${s.conf}%</td><td>RSI ${s.last.rsi != null ? s.last.rsi.toFixed(0) : "—"}</td><td>${vsEma}</td></tr>`;
+  }).join("");
+  const sides = MTF_LIST.map(t => mtf[t] && mtf[t].raw);
+  const nB = sides.filter(s => s === "BUY").length, nS = sides.filter(s => s === "SELL").length;
+  const align = sig.raw === "BUY" ? nB : sig.raw === "SELL" ? nS : 0;
+  const h4 = mtf.H4 && mtf.H4.raw, d1 = mtf.D1 && mtf.D1.raw;
+  let ctx;
+  if (sig.raw === "NEUTRAL")
+    ctx = nB >= 3 ? `Tak ada edge di ${tf}, tapi ${nB}/4 TF bullish — siaga BUY jika close > ${f1(L.e50)} + RSI>55.`
+      : nS >= 3 ? `Tak ada edge di ${tf}, tapi ${nS}/4 TF bearish — siaga SELL jika close < ${f1(L.e50)} + RSI<45.`
+      : `Tak ada edge — tutup chart, tunggu setup A+.`;
+  else if (align >= 3) ctx = `Selaras ${align}/4 TF — ikuti ${sig.raw}, size normal.`;
+  else if ((sig.raw === "BUY" && (h4 === "SELL" || d1 === "SELL")) || (sig.raw === "SELL" && (h4 === "BUY" || d1 === "BUY")))
+    ctx = `${sig.raw} ${tf} melawan H4/D1 — skip, atau size ½ + SL ketat.`;
+  else ctx = `Campuran ${nB}B/${nS}S — entry kecil, tunggu konfirmasi candle ${tf} berikutnya.`;
+  const verdict = sig.raw === "NEUTRAL"
+    ? `<p class="verdict neutral">TUNGGU — ${ctx}</p>`
+    : `<p class="verdict ${sig.raw.toLowerCase()}">${sig.dir} ${tf} @ ${f1(sig.price)} — ${ctx}</p>`;
+  const plan = sig.raw === "NEUTRAL" ? "" :
+    `<p>Entry ${f1(sig.lv.e)} • SL ${f1(sig.lv.sl)} (${f1(Math.abs(sig.lv.e - sig.lv.sl))}$) • TP1 ${f1(sig.lv.tp1)} • TP2 ${f1(sig.lv.tp2)} • Batal jika close ${tf} ${sig.raw === "BUY" ? "<" : ">"} ${f1(sig.raw === "BUY" ? L.swingLo : L.swingHi)}.</p>`;
+  const sgn = sig.raw === "BUY" ? 1 : -1;
+  const why = sig.raw === "NEUTRAL" ? ""
+    : `<ul class="why">${sig.votes.filter(v => v.v === sgn).sort((a, b) => b.w - a.w).slice(0, 3).map(v => `<li>${v.n}</li>`).join("")}</ul>`;
+  const lawan = sig.raw === "NEUTRAL" ? null : sig.votes.filter(v => v.v === -sgn).sort((a, b) => b.w - a.w)[0];
+  const risk = sig.exNote ? `<p class="riskline">${sig.exNote}</p>`
+    : lawan ? `<p class="riskline">Waspada: ${lawan.n}.</p>` : "";
+  const fund = (typeof fundState !== "undefined" && fundState.ok)
+    ? `<p class="fundline">Fund ${fundState.score > 0 ? "+" : ""}${fundState.score}: ${fundState.note.split(";").slice(0, 2).join("; ")}.</p>`
+    : `<p class="fundline">Fund offline — murni teknikal.</p>`;
+  return `${verdict}<table class="mtf"><tr><th>TF</th><th>Sinyal</th><th>Momentum</th><th>Tren</th></tr>${rows}</table>${plan}${why}${risk}${fund}`;
 }
 
 /* ---------- live price ---------- */
@@ -712,14 +648,7 @@ function renderChart(sig) {
     pill.className = "chart-pill " + sig.raw.toLowerCase();
     pill.innerHTML = `<b>${sig.dir}</b> ${sig.conf}% • Entry ${sig.lv.e.toFixed(1)} • SL ${sig.lv.sl.toFixed(1)} • TP1 ${sig.lv.tp1.toFixed(1)} • TP2 ${sig.lv.tp2.toFixed(1)}`;
   }
-  const pc = $("posCard");
-  if (typeof window !== "undefined" && window.LightweightCharts) {
-    const ok = renderLW(sig);
-    if (pc) pc.hidden = ok;
-  } else {
-    if (pc) pc.hidden = false;
-    drawPosChart(sig);
-  }
+  renderLW(sig);
 }
 
 /* ---------- realtime: WebSocket Binance (tick/detik + candle live) ---------- */
@@ -806,7 +735,9 @@ function drawSpark() {
 }
 function liveRecompute() {
   if (!state.candles.length) return;
-  render(buildSignal(state.candles), state._bt || "…"); // alert STRONG ikut bunyi realtime via guard internal render()
+  const sig = buildSignal(state.candles);
+  if (state._mtf) state._mtf[state.tf] = sig; // baris TF aktif di tabel MTF ikut realtime
+  render(sig, state._bt || "…"); // alert STRONG ikut bunyi realtime via guard internal render()
 }
 /* Staleness guard: harga basi >20 dtk TANPA update = jangan dipercaya. */
 function checkFresh() {
@@ -837,90 +768,6 @@ function fmtMs(ms) {
   return (h ? h + "j " : "") + String(m).padStart(2, "0") + ":" + String(ss).padStart(2, "0");
 }
 
-/* ---------- chart lokal + marker posisi (TradingView iframe tak bisa digambari) ---------- */
-function tstr(t) {
-  if (typeof t === "number") { const d = new Date(t); return String(d.getUTCHours()).padStart(2, "0") + ":" + String(d.getUTCMinutes()).padStart(2, "0"); }
-  const s = String(t);
-  return s.length > 10 ? s.slice(11, 16) : s.slice(5);
-}
-function drawPosChart(sig) {
-  const cv = $("posChart");
-  if (!cv || !state.candles.length || typeof cv.getContext !== "function") return;
-  const dpr = (typeof window !== "undefined" && window.devicePixelRatio) || 1;
-  const W = cv.clientWidth || 800, H = 400;
-  if (!W) return;
-  cv.width = W * dpr; cv.height = H * dpr; cv.style.height = H + "px";
-  const ctx = cv.getContext("2d");
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, W, H);
-  const N = Math.min(120, state.candles.length);
-  const data = state.candles.slice(-N);
-  const lv = sig.lv, L = sig.last;
-  const px = state.live ?? L.close;
-  let mn = Math.min(...data.map(c => c.low), lv.sl, lv.tp1, lv.tp2, lv.e, px);
-  let mx = Math.max(...data.map(c => c.high), lv.sl, lv.tp1, lv.tp2, lv.e, px);
-  const pad = (mx - mn) * 0.08 || 1; mn -= pad; mx += pad;
-  const ML = 6, MR = 66, MT = 10, MB = 20, PW = W - ML - MR, PH = H - MT - MB;
-  const X = j => ML + ((j + 0.5) / N) * PW;
-  const Y = p => MT + (1 - (p - mn) / (mx - mn)) * PH;
-  const cw = Math.max(2, (PW / N) * 0.62);
-  ctx.font = "10px system-ui"; ctx.lineWidth = 1;
-  ctx.strokeStyle = "#242424"; ctx.fillStyle = "#888";
-  for (let g = 0; g <= 4; g++) {
-    const p = mn + ((mx - mn) * g) / 4, y = Y(p);
-    ctx.beginPath(); ctx.moveTo(ML, y); ctx.lineTo(W - MR, y); ctx.stroke();
-    ctx.fillText(p.toFixed(1), W - MR + 5, y + 3);
-  }
-  for (let j = 0; j < N; j += Math.ceil(N / 6)) ctx.fillText(tstr(data[j].time), X(j) - 12, H - 5);
-  data.forEach((c, j) => {
-    const col = c.close >= c.open ? "#26a69a" : "#ef5350";
-    ctx.strokeStyle = col; ctx.fillStyle = col;
-    ctx.beginPath(); ctx.moveTo(X(j), Y(c.high)); ctx.lineTo(X(j), Y(c.low)); ctx.stroke();
-    const yO = Y(c.open), yC = Y(c.close);
-    ctx.fillRect(X(j) - cw / 2, Math.min(yO, yC), cw, Math.max(1, Math.abs(yC - yO)));
-  });
-  const cl = closes(state.candles);
-  [["#e8b64c", ema(cl, 20)], ["#5b8ff9", ema(cl, 50)]].forEach(([col, arr]) => {
-    ctx.strokeStyle = col; ctx.lineWidth = 1.3; ctx.beginPath();
-    arr.slice(-N).forEach((v, j) => { j ? ctx.lineTo(X(j), Y(v)) : ctx.moveTo(X(j), Y(v)); });
-    ctx.stroke(); ctx.lineWidth = 1;
-  });
-  // marker flip sinyal historis (▲ BUY / ▼ SELL, conf>=40)
-  let prevRaw = null;
-  const off = state.candles.length - N;
-  for (let j = Math.max(1, N - 40); j < N; j++) {
-    const s = buildSignal(state.candles.slice(0, off + j + 1));
-    if (s.raw !== "NEUTRAL" && s.raw !== prevRaw && s.conf >= 40) {
-      const c = data[j];
-      ctx.fillStyle = s.raw === "BUY" ? "#26a69a" : "#ef5350";
-      if (s.raw === "BUY") {
-        const y = Y(c.low) + 9;
-        ctx.beginPath(); ctx.moveTo(X(j), y + 8); ctx.lineTo(X(j) - 5, y); ctx.lineTo(X(j) + 5, y); ctx.fill();
-      } else {
-        const y = Y(c.high) - 9;
-        ctx.beginPath(); ctx.moveTo(X(j), y - 8); ctx.lineTo(X(j) - 5, y); ctx.lineTo(X(j) + 5, y); ctx.fill();
-      }
-    }
-    if (s.raw !== "NEUTRAL") prevRaw = s.raw;
-  }
-  const line = (p, col, tag, dash) => {
-    const y = Y(p);
-    ctx.strokeStyle = col; ctx.setLineDash(dash || []); ctx.beginPath();
-    ctx.moveTo(ML, y); ctx.lineTo(W - MR, y); ctx.stroke(); ctx.setLineDash([]);
-    ctx.fillStyle = col; ctx.fillRect(W - MR, y - 9, MR - 2, 17);
-    ctx.fillStyle = "#0d0d0d"; ctx.fillText(tag, W - MR + 5, y + 3.5);
-  };
-  line(L.swingHi, "#777", "R " + L.swingHi.toFixed(1), [3, 3]);
-  line(lv.tp2, "#26a69a", "TP2 " + lv.tp2.toFixed(1));
-  if (sig.raw !== "NEUTRAL") line(lv.tp1, "#26a69a", "TP1 " + lv.tp1.toFixed(1), [6, 3]);
-  line(lv.e, "#e8b64c", (sig.raw === "NEUTRAL" ? "PX " : sig.raw + " ") + lv.e.toFixed(1));
-  line(lv.sl, "#ef5350", "SL " + lv.sl.toFixed(1), [6, 3]);
-  line(L.swingLo, "#777", "S " + L.swingLo.toFixed(1), [3, 3]);
-  ctx.strokeStyle = "#f2f2f2"; ctx.setLineDash([2, 3]); ctx.beginPath();
-  ctx.moveTo(ML, Y(px)); ctx.lineTo(W - MR, Y(px)); ctx.stroke(); ctx.setLineDash([]);
-  ctx.fillStyle = "#f2f2f2"; ctx.beginPath(); ctx.arc(W - MR - 4, Y(px), 3, 0, 7); ctx.fill();
-}
-
 /* ---------- render ---------- */
 function beep() {
   if (!$("soundOn").checked) return;
@@ -936,34 +783,24 @@ function render(sig, bt) {
   const box = $("signalBox");
   box.className = "signal " + sig.raw.toLowerCase();
   $("signalDir").textContent = sig.dir;
-  $("signalConf").textContent = `Confidence ${sig.conf}% • ${state.tf} • ATR ${sig.atr.toFixed(2)}${sig.chop ? " • RANGE" : ""}`;
+  $("signalConf").textContent = `${sig.conf}% • ${state.tf} • ATR ${sig.atr.toFixed(2)}${sig.chop ? " • RANGE" : ""}`;
   const gEl = $("signalGrade");
   if (gEl) {
-    const gMsg = { "A+": "SETUP A+ • LAYAK EKSEKUSI", "A": "Setup A • size kecil / tunggu konfirmasi", "B": "Setup B • TUNGGU A+", "TUNGGU": "TUNGGU — tak ada edge, jangan paksa" }[sig.grade];
+    const gMsg = { "A+": "A+ • LAYAK EKSEKUSI", "A": "A • size kecil", "B": "B • TUNGGU A+", "TUNGGU": "TUNGGU" }[sig.grade];
     gEl.textContent = gMsg;
     gEl.className = "grade g" + sig.grade.replace("+", "p");
   }
-  const top = [...sig.votes].sort((a, b) => b.w - a.w).slice(0, 3).map(v => v.n).join(" • ");
-  $("signalReason").textContent = top;
-  const patEl = $("signalPattern");
-  if (patEl && sig.pattern) {
-    patEl.className = "pattern " + (sig.pattern.dir > 0 ? "bull" : sig.pattern.dir < 0 ? "bear" : "flat");
-    patEl.innerHTML = `Pola candle: <b>${sig.pattern.name}</b> — ${sig.pattern.note}`;
-  }
+  const sgn = sig.raw === "BUY" ? 1 : -1;
+  $("signalReason").textContent = sig.raw === "NEUTRAL"
+    ? (sig.exNote || "Tak ada edge — disiplin menunggu.")
+    : sig.votes.filter(v => v.v === sgn).sort((a, b) => b.w - a.w).slice(0, 2).map(v => v.n).join(" • ");
   $("lvEntry").textContent = sig.lv.e.toFixed(2);
   $("lvSL").textContent = sig.lv.sl.toFixed(2);
   $("lvTP1").textContent = sig.lv.tp1.toFixed(2);
   $("lvTP2").textContent = sig.lv.tp2.toFixed(2);
-  $("mATR").textContent = sig.atr.toFixed(2);
-  $("mSpread").textContent = (sig.atr * 0.08).toFixed(2) + " est";
-  const h = new Date().getUTCHours();
-  $("mSession").textContent = h >= 7 && h < 12 ? "London" : h >= 12 && h < 21 ? "New York" : h >= 0 && h < 7 ? "Asia" : "Off";
-  $("mWin").textContent = bt;
-  $("indBody").innerHTML = sig.votes.map(v =>
-    `<tr><td>${v.n}</td><td class="${v.v > 0 ? "bull" : v.v < 0 ? "bear" : "flat"}">${v.v > 0 ? "BULLISH" : v.v < 0 ? "BEARISH" : "FLAT"}</td></tr>`).join("");
-  $("analysisBox").innerHTML = buildAnalysis(state.candles, sig);
+  $("analysisBox").innerHTML = buildAnalysis(state.candles, sig, state._mtf || {});
+  $("metaLine").textContent = `ATR ${sig.atr.toFixed(2)} • Backtest 100 bar: ${bt} • PAXG proxy • ${state._mtfTime ? "MTF sync " + state._mtfTime : ""}`;
   state._sig = sig;
-  const pt = $("posTF"); if (pt) pt.textContent = state.tf;
   renderChart(sig);
   const sb = $("stickyBar");
   if (sb) {
@@ -1000,38 +837,53 @@ function drawHist() {
     : `<tr><td colspan="7">Belum ada.</td></tr>`;
 }
 
-/* ---------- main flow ---------- */
+/* ---------- main flow: fetch M15+H1+H4+D1 paralel, sinyal per TF ---------- */
 async function refresh() {
   const demo = $("demoMode").checked;
-  $("dataStatus").textContent = "memuat data…";
+  $("dataStatus").textContent = "memuat MTF…";
   try {
-    let cs, fromStooq = false;
     if (demo) throw new Error("demo");
-    try { cs = await getStooq(state.tf); fromStooq = true; $("dataStatus").textContent = "data: Stooq XAUUSD ✔"; }
-    catch { cs = await getBinance(state.tf); $("dataStatus").textContent = "data: Binance PAXG (proxy) ✔"; }
-    if (fromStooq && TF_CONF[state.tf].resample) cs = resample(cs, TF_CONF[state.tf].resample);
-    // M15 butuh 480 bar agar bias HTF H4 (resample ×16 → 30 bar) valid; dulu slice(-300)
-    // membuat htf.ok selalu false di M15 sehingga filter HTF mati diam-diam.
-    state.candles = cs.slice(-(state.tf === "M15" ? 480 : 300));
+    const all = await Promise.all(MTF_LIST.map(t => getKlines(t)));
+    MTF_LIST.forEach((t, k) => { state.mtf[t] = { candles: all[k] }; });
+    $("dataStatus").textContent = "data: Binance PAXG ✔";
   } catch {
-    state.candles = genDemo(state.live || 2650);
+    MTF_LIST.forEach(t => { state.mtf[t] = { candles: genDemo(state.live || 4400, MTF_KEEP[t]) }; });
     $("dataStatus").textContent = "data: DEMO offline (simulasi)";
   }
+  state.candles = state.mtf[state.tf].candles;
   if (!state.wsOk) await pollLive();
+  const mtf = computeMTF();
+  MTF_LIST.forEach(t => { state.mtf[t].sig = mtf[t]; });
+  state._mtf = mtf;
+  state._mtfTime = new Date().toLocaleTimeString("id-ID");
   state._bt = state.candles.length > 60 ? backtest(state.candles) : "—";
   render(buildSignal(state.candles), state._bt);
   // Fundamental non-blocking (jangan perlambat render): setelah tiba, hitung ulang sekali.
-  refreshFundamentals().then(() => { if (state.candles.length) render(buildSignal(state.candles), state._bt); }).catch(() => {});
+  refreshFundamentals().then(() => {
+    if (!state.candles.length) return;
+    const m2 = computeMTF();
+    MTF_LIST.forEach(t => { state.mtf[t].sig = m2[t]; });
+    state._mtf = m2;
+    render(buildSignal(state.candles), state._bt);
+  }).catch(() => {});
   if (!state.wsOk && !demo) connectWS();
   state.countdown = 60;
 }
 
 document.querySelectorAll(".tf").forEach(b => b.onclick = () => {
   document.querySelectorAll(".tf").forEach(x => x.classList.remove("active"));
-  b.classList.add("active"); state.tf = b.dataset.tf;
+  document.querySelectorAll(`.tf[data-tf="${b.dataset.tf}"]`).forEach(x => x.classList.add("active"));
+  state.tf = b.dataset.tf;
   $("activeTF").textContent = state.tf; state.lastSignal = null;
-  state.ticks = []; state._bt = null;
-  loadTV(state.tf); refresh(); connectWS();
+  if (state.mtf[state.tf] && state.mtf[state.tf].candles.length) {
+    // data MTF sudah ada — ganti TF tanpa fetch ulang (instan)
+    state.candles = state.mtf[state.tf].candles;
+    const sig = buildSignal(state.candles);
+    state._mtf[state.tf] = sig;
+    state._bt = backtest(state.candles);
+    render(sig, state._bt);
+  } else refresh();
+  connectWS();
 });
 $("btnClearHist").onclick = () => { localStorage.removeItem("xau_hist"); drawHist(); };
 $("inBalance").oninput = $("inRisk").oninput = () => { if (state.candles.length) calcLot(buildSignal(state.candles)); };
@@ -1041,7 +893,7 @@ $("demoMode").onchange = () => {
   refresh(); connectWS();
 };
 
-loadTV(state.tf); drawHist(); refresh(); connectWS();
+drawHist(); refresh(); connectWS();
 if (typeof window !== "undefined") {
   let rT;
   window.addEventListener("resize", () => { clearTimeout(rT); rT = setTimeout(() => { sizeLW(); if (state._sig) renderChart(state._sig); }, 200); });
