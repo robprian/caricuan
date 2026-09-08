@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>XAUUSD Signal — Lokal</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="dot"></span>
+    <div>
+      <h1>XAUUSD <span class="gold">Signal</span> <small>lokal</small></h1>
+      <p>Chart: TradingView (OANDA:XAUUSD) &nbsp;•&nbsp; Sinyal dihitung lokal di browser (EMA / RSI / MACD / ATR)</p>
+    </div>
+  </div>
+  <div class="livebox">
+    <div class="live-price"><span id="livePrice">—</span> <small id="liveSrc">menghubungkan…</small></div>
+    <div class="live-sub"><span id="priceChg">—</span> • <span id="lastUpdate">—</span></div>
+    <div class="live-sub"><span id="wsStatus" class="ws">WS: menghubungkan…</span> • <span id="candleCd">candle —</span> • <span id="tickRate">—</span></div>
+    <canvas id="spark" width="240" height="46"></canvas>
+    <div class="tf-row">
+      <button class="tf active" data-tf="M15">M15</button>
+      <button class="tf" data-tf="H1">H1</button>
+      <button class="tf" data-tf="H4">H4</button>
+      <button class="tf" data-tf="D1">D1</button>
+    </div>
+  </div>
+</header>
+
+<section class="card hero">
+  <div class="card-head">
+    <div>
+      <h2>Chart XAUUSD <span class="gold">TradingView</span></h2>
+      <p class="hint" style="margin:2px 0 0">Library resmi TradingView • data & marker realtime milik sendiri • <span id="lwStatus" class="badge">chart: memuat…</span></p>
+    </div>
+  </div>
+  <div class="chart-wrap">
+    <div id="lwChart"></div>
+    <div class="tf-float">
+      <button class="tf active" data-tf="M15">M15</button>
+      <button class="tf" data-tf="H1">H1</button>
+      <button class="tf" data-tf="H4">H4</button>
+      <button class="tf" data-tf="D1">D1</button>
+    </div>
+    <div id="chartPill" class="chart-pill">Menunggu data…</div>
+  </div>
+  <p class="hint">▲/▼ = sinyal flip • garis emas = entry • merah = SL • hijau = TP1/TP2 • abu = S/R • di HP: cubit untuk zoom, geser untuk scroll.</p>
+</section>
+
+<main class="layout2">
+  <!-- SINYAL -->
+  <section class="card signal-card">
+    <div class="card-head"><h2><span id="liveDot" class="livedot"></span>Sinyal aktif (<span id="activeTF">M15</span>)</h2><span id="countdown" class="badge">60s</span></div>
+    <div id="signalBox" class="signal neutral">
+      <div id="signalDir" class="dir">NEUTRAL</div>
+      <div id="signalConf" class="conf">Confidence —%</div>
+      <div id="signalGrade" class="grade">—</div>
+      <div id="signalReason" class="reason">Menunggu data…</div>
+    </div>
+    <div class="levels">
+      <div><label>Entry</label><b id="lvEntry">—</b></div>
+      <div><label>SL</label><b id="lvSL" class="red">—</b></div>
+      <div><label>TP1 (1:1)</label><b id="lvTP1" class="green">—</b></div>
+      <div><label>TP2 (1:2)</label><b id="lvTP2" class="green">—</b></div>
+    </div>
+    <h3>Analisa realtime — kapan buy / sell + alasan</h3>
+    <div id="analysisBox" class="analysis"><p class="hint">Menunggu data…</p></div>
+    <div class="meta-grid">
+      <div><label>ATR(14)</label><b id="mATR">—</b></div>
+      <div><label>Spread est.</label><b id="mSpread">—</b></div>
+      <div><label>Sesi</label><b id="mSession">—</b></div>
+      <div><label>Backtest 100 bar</label><b id="mWin">—</b></div>
+    </div>
+    <h3>Indikator</h3>
+    <table class="ind">
+      <tbody id="indBody"><tr><td>Memuat…</td></tr></tbody>
+    </table>
+    <h3>Kalkulator lot</h3>
+    <div class="risk">
+      <label>Balance ($) <input id="inBalance" type="number" value="1000" /></label>
+      <label>Risk (%) <input id="inRisk" type="number" value="1" step="0.1" /></label>
+      <div class="risk-out">Lot saran: <b id="outLot">—</b> <small id="outRiskUsd"></small></div>
+    </div>
+  </section>
+
+  <!-- PENDAMPING: widget resmi TradingView (visual + drawing tools) -->
+  <section class="card chart-card">
+    <div class="card-head">
+      <h2>TradingView resmi (pendamping)</h2>
+      <div class="head-actions">
+        <span id="dataStatus" class="badge">memuat data…</span>
+        <label class="switch"><input type="checkbox" id="demoMode" /> <span>Mode demo (offline)</span></label>
+        <label class="switch"><input type="checkbox" id="soundOn" checked /> <span>Suara alert</span></label>
+      </div>
+    </div>
+    <div id="tv-container" class="tradingview-widget-container">
+      <div id="tv-widget" class="tradingview-widget-container__widget"></div>
+    </div>
+    <p class="hint">Sinyal dihitung lokal dari feed publik XAUUSD (Stooq → Gold-API → Binance PAXG fallback), bukan dari widget ini.</p>
+  </section>
+</main>
+
+<section class="card" id="posCard" hidden>
+  <div class="card-head"><h2>Chart posisi / fallback (<span id="posTF">M15</span>)</h2><span class="badge">canvas lokal</span></div>
+  <canvas id="posChart" class="poschart"></canvas>
+  <p class="hint">▲ hijau = flip BUY • ▼ merah = flip SELL (conf ≥ 40) • garis emas = entry • merah = SL • hijau = TP1/TP2 • abu putus-putus = range 20-bar (S/R) • titik putih = harga live. Chart TradingView di atas adalah iframe dan tak bisa digambari dari luar — chart ini digambar lokal dari data yang sama dengan engine sinyal.</p>
+</section>
+
+<section class="card">
+  <div class="card-head"><h2>Riwayat sinyal kuat (tersimpan lokal)</h2><button id="btnClearHist">Hapus</button></div>
+  <table class="hist"><thead><tr><th>Waktu</th><th>TF</th><th>Sinyal</th><th>Conf</th><th>Entry</th><th>SL</th><th>TP2</th></tr></thead>
+  <tbody id="histBody"><tr><td colspan="7">Belum ada.</td></tr></tbody></table>
+  <p class="hint">Bukan saran keuangan. Gold volatil — selalu pakai SL. Sinyal ini tools bantu teknikal, bukan jaminan profit.</p>
+</section>
+
+<div id="stickyBar" class="stickybar"><span id="sbDir" class="sb-dir">—</span><span id="sbLv">—</span></div>
+<script src="vendor/lightweight-charts.standalone.production.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
