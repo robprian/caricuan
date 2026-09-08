@@ -2,6 +2,10 @@
 
 Jalankan lokal, tanpa build, tanpa API key.
 
+## Akses online (GitHub Pages)
+
+[https://robprian.github.io/caricuan/](https://robprian.github.io/caricuan/)
+
 ## Cara pakai (pilih satu)
 
 ```bash

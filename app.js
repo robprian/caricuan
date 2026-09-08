@@ -198,6 +198,52 @@ function volRatio(a, j) {
   return med ? a[j] / med : 1;
 }
 
+/* ---------- analisa lanjutan: pola candle, pivot harian, fibonacci ---------- */
+/* Pola candle terakhir (informasi saja — tidak mengubah voting engine). */
+function candlePattern(cs) {
+  const i = cs.length - 1;
+  if (i < 2) return { name: "—", dir: 0, note: "data kurang" };
+  const c = cs[i], p = cs[i - 1];
+  const body = Math.abs(c.close - c.open), range = (c.high - c.low) || 1e-9;
+  const up = c.close >= c.open;
+  const prevBody = Math.abs(p.close - p.open), prevUp = p.close >= p.open;
+  const upper = c.high - Math.max(c.open, c.close), lower = Math.min(c.open, c.close) - c.low;
+  if (body <= 0.1 * range) return { name: "Doji", dir: 0, note: "indecision — tunggu konfirmasi candle berikutnya" };
+  if (prevBody > 0 && body > prevBody && up !== prevUp && c.close > p.open && c.open < p.close)
+    return { name: up ? "Bullish Engulfing" : "Bearish Engulfing", dir: up ? 1 : -1, note: up ? "pembeli mengambil alih dari penjual" : "penjual mengambil alih dari pembeli" };
+  if (lower >= 2 * body && upper <= 0.3 * body) return { name: "Hammer", dir: 1, note: "rejection bawah — rawan pantul naik" };
+  if (upper >= 2 * body && lower <= 0.3 * body) return { name: "Shooting Star", dir: -1, note: "rejection atas — rawan turun" };
+  if (body >= 0.9 * range) return { name: up ? "Marubozu Bullish" : "Marubozu Bearish", dir: up ? 1 : -1, note: "body penuh — momentum kuat searah" };
+  if (c.high <= p.high && c.low >= p.low) return { name: "Inside Bar", dir: 0, note: "kompresi volatilitas — tunggu breakout arah" };
+  return { name: up ? "Bullish" : "Bearish", dir: up ? 1 : -1, note: "candle normal tanpa sinyal spesifik" };
+}
+function dayKey(t) {
+  if (typeof t === "number") return new Date(t).toISOString().slice(0, 10);
+  const s = String(t);
+  return s.length > 10 ? s.slice(0, 10) : s;
+}
+/* Pivot harian klasik dari hari trading terakhir yang sudah selesai. */
+function pivotLevels(cs) {
+  const lastDay = dayKey(cs[cs.length - 1].time);
+  let hi = -Infinity, lo = Infinity, cl = null;
+  for (let i = cs.length - 1; i >= 0; i--) {
+    if (dayKey(cs[i].time) === lastDay) continue;
+    hi = Math.max(hi, cs[i].high); lo = Math.min(lo, cs[i].low); cl = cs[i].close;
+  }
+  if (!isFinite(hi) || cl == null) return null;
+  const P = (hi + lo + cl) / 3;
+  return { P, R1: 2 * P - lo, S1: 2 * P - hi, R2: P + (hi - lo), S2: P - (hi - lo), R3: hi + 2 * (P - lo), S3: lo - 2 * (hi - P) };
+}
+/* Fibonacci retracement dari swing terakhir (n bar). */
+function fibLevels(cs, n = 60) {
+  const w = cs.slice(Math.max(0, cs.length - n));
+  let hi = -Infinity, lo = Infinity;
+  w.forEach(c => { hi = Math.max(hi, c.high); lo = Math.min(lo, c.low); });
+  const rg = hi - lo;
+  if (rg <= 0) return null;
+  return { hi, lo, levels: [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1].map(f => ({ f, p: hi - rg * f })) };
+}
+
 /* ---------- engine sinyal ---------- */
 function buildSignal(cs) {
   const cl = closes(cs), i = cs.length - 1, prev = cs.length - 2;
@@ -303,7 +349,7 @@ function buildSignal(cs) {
   const extATR = Math.abs(price - last.e20) / (last.atr || 1);
   const zone = dir === "BUY" ? (price > last.e20 ? last.e20 : last.e50)
     : dir === "SELL" ? (price < last.e20 ? last.e20 : last.e50) : null;
-  return { dir: strength + dir, raw: dir, conf, votes, last, lv, price, atr: last.atr, score, chop, grade, whyNot, htfAgree, extATR, zone, tag, exNote };
+  return { dir: strength + dir, raw: dir, conf, votes, last, lv, price, atr: last.atr, score, chop, grade, whyNot, htfAgree, extATR, zone, tag, exNote, pattern: candlePattern(cs) };
 }
 function backtest(cs) {
   let t = 0, w1 = 0, w2 = 0;
@@ -370,10 +416,38 @@ function buildAnalysis(cs, sig) {
     : sig.grade === "A" ? "Bagus tapi belum elite — size kecil, atau tunggu konfirmasi candle berikutnya"
     : sig.grade === "B" ? "Campuran — JANGAN entry dulu, tunggu setup A+"
     : "Tidak ada edge — tutup chart, jangan paksa entry. Disiplin menunggu = profit.";
+  // --- analisa lanjutan: skor voting, level kunci, pivot, fibonacci, sesi, manajemen trade ---
+  let wBull = 0, wBear = 0;
+  sig.votes.forEach(v => { if (v.v > 0) wBull += v.w; else if (v.v < 0) wBear += v.w; });
+  const totW = wBull + wBear;
+  const scoreTxt = totW ? `${Math.round(100 * wBull / totW)}% BULL vs ${Math.round(100 * wBear / totW)}% BEAR (net ${sig.score >= 0 ? "+" : ""}${sig.score})` : "imbang";
+  const win50 = cs.slice(Math.max(0, cs.length - 50));
+  const majHi = Math.max(...win50.map(x => x.high)), majLo = Math.min(...win50.map(x => x.low));
+  const majTxt = `${f1(majLo)} / ${f1(majHi)}` + (px < majLo ? " — di BAWAH support utama (breakdown)" : px > majHi ? " — di ATAS resistance utama (breakout)" : " — harga di dalam area ini");
+  const pv = pivotLevels(cs);
+  const pvTxt = pv ? `P ${f1(pv.P)} • R1 ${f1(pv.R1)} • R2 ${f1(pv.R2)} • S1 ${f1(pv.S1)} • S2 ${f1(pv.S2)}${px > pv.R1 ? " — di atas R1" : px < pv.S1 ? " — di bawah S1" : ""}` : "data harian belum cukup";
+  const fibs = fibLevels(cs);
+  let fibTxt = "—";
+  if (fibs) {
+    const near = fibs.levels.filter(l => Math.abs(l.p - px) <= 2 * atr);
+    fibTxt = fibs.levels.map(l => l.p.toFixed(1)).join(" / ") + (near.length ? ` — dekat harga: ${near.map(l => l.p.toFixed(1)).join(", ")}` : "");
+  }
+  const hNow = new Date().getUTCHours() + new Date().getUTCMinutes() / 60;
+  const sessName = hNow >= 7 && hNow < 12 ? "London" : hNow >= 12 && hNow < 21 ? "New York" : hNow >= 0 && hNow < 7 ? "Asia" : "Off";
+  const liq = hNow >= 12 && hNow < 16 ? "Overlap London–NY, likuiditas tertinggi" : hNow >= 7 && hNow < 12 ? "London aktif" : hNow >= 12 && hNow < 21 ? "New York aktif" : hNow >= 0 && hNow < 7 ? "Asia aktif" : "Jam sepi — spread lebar, hindari entry";
+  const mgmt = sig.raw === "BUY"
+    ? `TP1 (1R) → kunci 50% posisi, SL pindah ke breakeven. TP2 (2R) → runner, trailing 2×ATR. Batal jika close ${tf} < ${f1(L.swingLo)}.`
+    : sig.raw === "SELL"
+    ? `TP1 (1R) → kunci 50% posisi, SL pindah ke breakeven. TP2 (2R) → runner, trailing 2×ATR. Batal jika close ${tf} > ${f1(L.swingHi)}.`
+    : "Belum ada posisi — disiplin menunggu setup A+ lebih baik daripada memaksa entry.";
   const gWhy = sig.whyNot && sig.whyNot.length ? `<div class="kv"><span>Syarat A+ yg belum lolos</span><b>${sig.whyNot.join("; ")}</b></div>` : "";
   const gZone = sig.zone != null ? `<div class="kv"><span>Zona limit ideal</span><b>${sig.zone.toFixed(1)} (tunggu pullback ke EMA, entry lebih murah; ekstensi harga ${sig.extATR.toFixed(1)}× ATR${sig.extATR > 1 ? " — KEJAR HARGA = dilarang" : ""})</b></div>` : "";
   return `<div class="gradebanner g${sig.grade.replace("+", "p")}">SETUP ${sig.grade} — ${gBanner}</div>${gWhy}${gZone}
   <div class="kv"><span>Posisi harga</span><b>${f2(px)} — ${pos}</b></div>
+    <div class="kv"><span>Skor voting</span><b>${scoreTxt}</b></div>
+    <div class="kv"><span>Support/Resistance utama (50 bar)</span><b>${majTxt}</b></div>
+    <div class="kv"><span>Pivot harian (klasik)</span><b>${pvTxt}</b></div>
+    <div class="kv"><span>Fibonacci (swing 60 bar)</span><b>${fibTxt}</b></div>
     <div class="kv"><span>Range 20 bar</span><b>${f1(L.swingLo)} – ${f1(L.swingHi)}</b></div>
     <div class="kv"><span>EMA20 / 50 / 200</span><b>${f1(L.e20)} / ${f1(L.e50)} / ${f1(L.e200)}</b></div>
     <div class="kv"><span>RSI14</span><b>${f1(L.rsi)} (bar lalu ${f1(L.rsiPrev)}) ${L.rsi > 55 ? "— bullish" : L.rsi < 45 ? "— bearish" : "— netral"}</b></div>
@@ -383,6 +457,8 @@ function buildAnalysis(cs, sig) {
     <div class="kv"><span>Bollinger %B</span><b>${L.bb != null ? L.bb.toFixed(2) + (L.bb < 0.15 ? " — oversold, rawan pantul" : L.bb > 0.85 ? " — overbought, rawan reject" : " — tengah band") : "—"}</b></div>
     <div class="kv"><span>Volatilitas</span><b>ATR ${f2(atr)} (${f1(L.volX)}× normal)${L.volX > 1.8 ? " — MELONJAK: setengah lot, jangan rapatkan SL" : ""}</b></div>
     <div class="kv"><span>Divergensi RSI</span><b>${L.div > 0 ? "BULLISH — harga LL, RSI HL (waspada pantulan)" : L.div < 0 ? "BEARISH — harga HH, RSI LH (waspada reject)" : "tidak ada"}</b></div>${sig.exNote ? `<div class="kv"><span>Rem exhaustion</span><b>${sig.exNote}</b></div>` : ""}${sig.tag === "COUNTERTREND" ? `<div class="kv"><span>Mode</span><b>COUNTERTREND — size setengah, TP di mean (EMA), batal jika extreme jebol lagi</b></div>` : ""}
+    <div class="kv"><span>Sesi & likuiditas</span><b>${sessName} (${new Date().toISOString().slice(11, 16)} UTC) — ${liq}</b></div>
+    <div class="kv"><span>Manajemen trade</span><b>${mgmt}</b></div>
     ${flat.length ? `<div class="kv"><span>Netral (tunggu)</span><b>${flat.join("; ")}</b></div>` : ""}
     ${plan("BUY")}${plan("SELL")}`;
 }
@@ -744,6 +820,11 @@ function render(sig, bt) {
   }
   const top = [...sig.votes].sort((a, b) => b.w - a.w).slice(0, 3).map(v => v.n).join(" • ");
   $("signalReason").textContent = top;
+  const patEl = $("signalPattern");
+  if (patEl && sig.pattern) {
+    patEl.className = "pattern " + (sig.pattern.dir > 0 ? "bull" : sig.pattern.dir < 0 ? "bear" : "flat");
+    patEl.innerHTML = `Pola candle: <b>${sig.pattern.name}</b> — ${sig.pattern.note}`;
+  }
   $("lvEntry").textContent = sig.lv.e.toFixed(2);
   $("lvSL").textContent = sig.lv.sl.toFixed(2);
   $("lvTP1").textContent = sig.lv.tp1.toFixed(2);
